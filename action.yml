@@ -1,0 +1,82 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: action
+name: jsm-create-request
+description: Create a Jira Service Management customer request
+
+inputs:
+  jsm-url:
+    description: Base URL of your Jira site (e.g. https://yourcompany.atlassian.net)
+    required: true
+  jsm-email:
+    description: Atlassian account email used for API authentication
+    required: true
+  jsm-token:
+    description: Atlassian API token (store as a secret, never hardcode)
+    required: true
+  service-desk-id:
+    description: Numeric ID of the target service desk (GET /rest/servicedeskapi/servicedesk to list)
+    required: true
+  request-type-id:
+    description: Numeric ID of the request type (GET /rest/servicedeskapi/servicedesk/{id}/requesttype)
+    required: true
+  summary:
+    description: Request summary/title
+    required: true
+  description:
+    description: Request description body
+    required: false
+    default: ""
+
+outputs:
+  issue-key:
+    value: ${{ steps.create.outputs.issue-key }}
+    description: The created issue key (e.g. HELP-123)
+  issue-url:
+    value: ${{ steps.create.outputs.issue-url }}
+    description: Direct link to the created request
+
+runs:
+  using: composite
+  steps:
+    - id: create
+      name: Create JSM request
+      uses: docker://curlimages/curl:8.10.1
+      shell: sh
+      run: |
+        set -eu
+
+        PAYLOAD=$(cat <<EOF
+        {
+          "serviceDeskId": "${{ inputs.service-desk-id }}",
+          "requestTypeId": "${{ inputs.request-type-id }}",
+          "requestFieldValues": {
+            "summary": "${{ inputs.summary }}",
+            "description": "${{ inputs.description }}"
+          }
+        }
+        EOF
+        )
+
+        RESPONSE=$(curl -sS -w '\n%{http_code}' \
+          -X POST \
+          -u "${{ inputs.jsm_email }}:${{ inputs.jsm_token }}" \
+          -H "Content-Type: application/json" \
+          -H "Accept: application/json" \
+          "${{ inputs.jsm_url }}/rest/servicedeskapi/request" \
+          -d "$PAYLOAD")
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | sed '$d')
+
+        if [ "$HTTP_CODE" != "201" ]; then
+          echo "Failed to create JSM request (HTTP $HTTP_CODE)"
+          echo "$BODY"
+          exit 1
+        fi
+
+        # Extract issueKey without requiring jq (curl image is minimal)
+        ISSUE_KEY=$(echo "$BODY" | sed -n 's/.*"issueKey":"\([^"]*\)".*/\1/p')
+
+        echo "Created request: $ISSUE_KEY"
+        echo "issue-key=$ISSUE_KEY" >> $CLOUDBEES_OUTPUTS
+        echo "issue-url=${{ inputs.jsm-url }}/browse/$ISSUE_KEY" >> $CLOUDBEES_OUTPUTS
